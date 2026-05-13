@@ -1,0 +1,209 @@
+// Smart Aid Distribution System — Database Schema
+// PostgreSQL via Supabase + Prisma ORM
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---- Users (Admin / Operator) ----
+
+enum UserRole {
+  admin
+  operator
+}
+
+model User {
+  id         String   @id @default(uuid()) @db.Uuid
+  username   String   @unique @db.VarChar(100)
+  password   String   @db.VarChar(255)
+  role       UserRole
+  branch_id  String?  @db.Uuid
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relations
+  branch               Branch?              @relation(fields: [branch_id], references: [id])
+  distributions        Distribution[]
+  audit_logs           AuditLog[]
+  campaign_assignments CampaignAssignment[]
+
+  @@index([role])
+  @@index([branch_id])
+  @@map("users")
+}
+
+// ---- Branches ----
+
+model Branch {
+  id         String   @id @default(uuid()) @db.Uuid
+  name       String   @unique @db.VarChar(200)
+  region     String   @db.VarChar(200)
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relations
+  users         User[]
+  beneficiaries Beneficiary[]
+  distributions Distribution[]
+  audit_logs    AuditLog[]
+
+  @@map("branches")
+}
+
+// ---- Campaigns ----
+
+enum CampaignStatus {
+  planned
+  active
+  closed
+}
+
+enum AidType {
+  food
+  medicine
+  baby_milk
+  clothing
+}
+
+model Campaign {
+  id             String         @id @default(uuid()) @db.Uuid
+  name           String         @db.VarChar(200)
+  aid_type       AidType
+  status         CampaignStatus @default(planned)
+  scheduled_date DateTime       @db.Date
+  created_at     DateTime       @default(now())
+  updated_at     DateTime       @updatedAt
+
+  // Relations
+  distributions Distribution[]
+  audit_logs    AuditLog[]
+  assignments   CampaignAssignment[]
+
+  @@index([status])
+  @@index([aid_type])
+  @@map("campaigns")
+}
+
+// ---- Beneficiaries ----
+
+model Beneficiary {
+  id                 String   @id @default(uuid()) @db.Uuid
+  full_name          String   @db.VarChar(200)
+  family_size        Int      @default(1) @db.SmallInt
+  num_infants        Int      @default(0) @db.SmallInt
+  phone              String   @db.VarChar(20)
+  assigned_branch_id String   @db.Uuid
+  qr_token           String   @unique @db.VarChar(2000)
+  qr_jti             String   @unique @db.Uuid
+  national_id        String   @unique @db.VarChar(20)
+  priority_score     Int      @default(0) @db.SmallInt
+  is_active          Boolean  @default(true)
+  created_at         DateTime @default(now())
+  updated_at         DateTime @updatedAt
+
+  // Relations
+  assigned_branch Branch               @relation(fields: [assigned_branch_id], references: [id])
+  distributions   Distribution[]
+  audit_logs      AuditLog[]
+  assignments     CampaignAssignment[]
+
+  @@index([assigned_branch_id])
+  @@index([is_active])
+  @@index([national_id])
+  @@index([priority_score(sort: Desc)])
+  @@map("beneficiaries")
+}
+
+// ---- Distributions ----
+
+model Distribution {
+  id             String   @id @default(uuid()) @db.Uuid
+  beneficiary_id String   @db.Uuid
+  campaign_id    String   @db.Uuid
+  operator_id    String   @db.Uuid
+  branch_id      String   @db.Uuid
+  distributed_at DateTime @default(now())
+  method         String   @db.VarChar(10) // 'qr' | 'pin'
+  synced         Boolean  @default(false)
+  hmac_signature String   @db.VarChar(500)
+  created_at     DateTime @default(now())
+
+  // Relations
+  beneficiary Beneficiary @relation(fields: [beneficiary_id], references: [id])
+  campaign    Campaign    @relation(fields: [campaign_id], references: [id])
+  operator    User        @relation(fields: [operator_id], references: [id])
+  branch      Branch      @relation(fields: [branch_id], references: [id])
+
+  // CRITICAL: Prevents double distribution per beneficiary per campaign
+  @@unique([beneficiary_id, campaign_id])
+  @@index([campaign_id])
+  @@index([operator_id])
+  @@index([branch_id])
+  @@index([synced])
+  @@map("distributions")
+}
+
+// ---- Audit Logs (Append-Only) ----
+
+enum AuditEventType {
+  SCAN
+  APPROVE
+  REJECT
+  CONFLICT
+  REPLAY
+}
+
+model AuditLog {
+  id             String         @id @default(uuid()) @db.Uuid
+  event_type     AuditEventType
+  operator_id    String         @db.Uuid
+  beneficiary_id String?        @db.Uuid
+  campaign_id    String?        @db.Uuid
+  branch_id      String?        @db.Uuid
+  details        String?        @db.Text
+  hmac_signature String         @db.VarChar(500)
+  created_at     DateTime       @default(now())
+
+  // Relations
+  operator    User         @relation(fields: [operator_id], references: [id])
+  beneficiary Beneficiary? @relation(fields: [beneficiary_id], references: [id])
+  campaign    Campaign?    @relation(fields: [campaign_id], references: [id])
+  branch      Branch?      @relation(fields: [branch_id], references: [id])
+
+  @@index([event_type])
+  @@index([operator_id])
+  @@index([branch_id])
+  @@index([created_at])
+  @@map("audit_logs")
+}
+
+// ---- Campaign Assignments (Admin assigns beneficiary → operator per campaign) ----
+
+model CampaignAssignment {
+  id             String   @id @default(uuid()) @db.Uuid
+  campaign_id    String   @db.Uuid
+  beneficiary_id String   @db.Uuid
+  operator_id    String   @db.Uuid
+  qr_token       String   @db.VarChar(2000)
+  qr_jti         String   @unique @db.Uuid
+  issued_at      DateTime @default(now())
+
+  // Relations
+  campaign    Campaign    @relation(fields: [campaign_id], references: [id], onDelete: Cascade)
+  beneficiary Beneficiary @relation(fields: [beneficiary_id], references: [id], onDelete: Cascade)
+  operator    User        @relation(fields: [operator_id], references: [id])
+
+  // One beneficiary cannot be assigned twice to the same campaign
+  @@unique([campaign_id, beneficiary_id])
+  @@index([campaign_id])
+  @@index([operator_id])
+  @@index([beneficiary_id])
+  @@map("campaign_assignments")
+}
